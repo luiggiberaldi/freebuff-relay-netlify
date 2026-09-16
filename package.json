@@ -1,0 +1,14 @@
+{
+  "name": "freebuff-relay-netlify",
+  "version": "1.0.0",
+  "description": "Freebuff Netlify Streaming Relay Proxy",
+  "main": "netlify/functions/relay.mts",
+  "type": "module",
+  "scripts": {
+    "build": "echo Relay ready"
+  },
+  "devDependencies": {
+    "@netlify/functions": "^2.8.2",
+    "typescript": "^5.4.0"
+  }
+}
