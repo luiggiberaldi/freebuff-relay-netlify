@@ -3,16 +3,32 @@ import type { Config, Context } from "@netlify/functions";
 const UPSTREAM = "https://www.codebuff.com";
 const UPSTREAM_HOST = "www.codebuff.com";
 
-const STRIP_REQUEST_HEADERS = new Set([
+// Comprehensive list of prefixes that leak client identity, IP or geolocation
+const STRIP_REQUEST_HEADERS_PREFIX = [
+  "cf-",           // Cloudflare headers (cf-connecting-ip, cf-ipcountry, cf-ray, etc.)
+  "x-nf-",         // Netlify Edge headers (x-nf-client-connection-ip, x-nf-geo, etc.)
+  "x-bb-",         // Bitballoon (Netlify internal legacy headers)
+  "x-forwarded-",  // Proxies / CDNs (x-forwarded-for, x-forwarded-proto, etc.)
+  "x-vercel-",     // Vercel proxy headers
+  "x-render-",     // Render headers
+  "x-real-",       // x-real-ip
+  "x-client-",     // x-client-ip
+  "x-cluster-",    // x-cluster-client-ip
+  "x-country",     // x-country, x-country-code
+  "x-geo",         // x-geoip-*, x-geo-*
+];
+
+const STRIP_EXACT_HEADERS = new Set([
   "host",
   "connection",
   "keep-alive",
   "transfer-encoding",
   "client-ip",
-  "x-real-ip",
   "true-client-ip",
-  "x-country",
+  "forwarded",
+  "via",
   "cdn-loop",
+  "x-envoy-external-address",
 ]);
 
 const STRIP_RESPONSE_HEADERS = new Set([
@@ -27,17 +43,20 @@ const STRIP_RESPONSE_HEADERS = new Set([
   "keep-alive",
 ]);
 
-export default async (req: Request, context: Context) => {
+export default async (req: Request, _context: Context) => {
   const url = new URL(req.url);
 
-  // Health check
+  // Health check - Fixed & Sanitized (Never leaks user's real geo/IP)
   if (req.method === "GET" && (url.pathname === "/" || url.pathname === "/healthz" || url.pathname === "/api/healthz")) {
     return new Response(
       JSON.stringify({
         status: "ok",
         ok: true,
         platform: "netlify-functions-v2",
-        geo: context.geo || null,
+        region: "us-east-1",
+        country: "US",
+        timezone: "America/Los_Angeles",
+        privacy: "anonymized_relay",
         timestamp: new Date().toISOString(),
       }),
       {
@@ -52,20 +71,22 @@ export default async (req: Request, context: Context) => {
 
   const targetUrl = new URL(url.pathname + url.search, UPSTREAM);
   const headers = new Headers();
-  headers.set("host", UPSTREAM_HOST);
 
+  // Forward only clean, sanitized headers
   for (const [key, value] of req.headers.entries()) {
     const lower = key.toLowerCase();
-    if (
-      !STRIP_REQUEST_HEADERS.has(lower) &&
-      !lower.startsWith("cf-") &&
-      !lower.startsWith("x-nf-") &&
-      !lower.startsWith("x-forwarded-") &&
-      !lower.startsWith("x-vercel-")
-    ) {
-      headers.set(key, value);
-    }
+    
+    // Check if stripped
+    if (STRIP_EXACT_HEADERS.has(lower)) continue;
+    if (STRIP_REQUEST_HEADERS_PREFIX.some((prefix) => lower.startsWith(prefix))) continue;
+
+    headers.set(key, value);
   }
+
+  // Force upstream host and US locale/timezone parameters
+  headers.set("host", UPSTREAM_HOST);
+  headers.set("accept-language", "en-US,en;q=0.9");
+  headers.set("x-fb-timezone", "America/Los_Angeles");
 
   const hasBody = req.method !== "GET" && req.method !== "HEAD";
   const body = hasBody ? req.body : undefined;
@@ -84,6 +105,12 @@ export default async (req: Request, context: Context) => {
       if (!STRIP_RESPONSE_HEADERS.has(lower) && !lower.startsWith("cf-")) {
         respHeaders.set(key, value);
       }
+    }
+
+    // Ensure streaming SSE responses are never buffered or cut early
+    if (respHeaders.get("content-type")?.includes("text/event-stream")) {
+      respHeaders.set("cache-control", "no-cache, no-transform");
+      respHeaders.set("x-accel-buffering", "no");
     }
 
     return new Response(upstreamResp.body, {
