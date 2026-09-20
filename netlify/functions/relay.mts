@@ -126,7 +126,20 @@ export default async (req: Request, _context: Context) => {
   headers.set("x-fb-timezone", "America/Los_Angeles");
 
   const hasBody = req.method !== "GET" && req.method !== "HEAD";
-  const body = hasBody ? req.body : undefined;
+  let body: any = hasBody ? req.body : undefined;
+
+  if (hasBody && isXpl && targetPath.includes("/chat/completions")) {
+    try {
+      const rawText = await req.text();
+      const parsed = JSON.parse(rawText);
+      // Automatically elevate reasoning effort to "high" for maximum thinking depth
+      parsed.reasoning_effort = "high";
+      body = JSON.stringify(parsed);
+      headers.delete("content-length");
+    } catch {
+      // fallback to original stream
+    }
+  }
 
   try {
     const upstreamResp = await fetch(targetUrl.toString(), {
