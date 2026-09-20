@@ -1,7 +1,10 @@
 import type { Config, Context } from "@netlify/functions";
 
-const UPSTREAM = "https://www.codebuff.com";
-const UPSTREAM_HOST = "www.codebuff.com";
+const CODEBUFF_UPSTREAM = "https://www.codebuff.com";
+const CODEBUFF_HOST = "www.codebuff.com";
+
+const EXPERIENTIAL_UPSTREAM = "https://api.experientiallabs.ai";
+const EXPERIENTIAL_HOST = "api.experientiallabs.ai";
 
 // Comprehensive list of prefixes that leak client identity, IP or geolocation
 const STRIP_REQUEST_HEADERS_PREFIX = [
@@ -46,6 +49,18 @@ const STRIP_RESPONSE_HEADERS = new Set([
 export default async (req: Request, _context: Context) => {
   const url = new URL(req.url);
 
+  // CORS Preflight
+  if (req.method === "OPTIONS") {
+    return new Response(null, {
+      status: 204,
+      headers: {
+        "access-control-allow-origin": "*",
+        "access-control-allow-methods": "GET, POST, PUT, DELETE, OPTIONS",
+        "access-control-allow-headers": "*",
+      },
+    });
+  }
+
   // Health check - Fixed & Sanitized (Never leaks user's real geo/IP)
   if (req.method === "GET" && (url.pathname === "/" || url.pathname === "/healthz" || url.pathname === "/api/healthz")) {
     return new Response(
@@ -57,6 +72,7 @@ export default async (req: Request, _context: Context) => {
         country: "US",
         timezone: "America/Los_Angeles",
         privacy: "anonymized_relay",
+        services: ["codebuff", "experientiallabs"],
         timestamp: new Date().toISOString(),
       }),
       {
@@ -64,12 +80,33 @@ export default async (req: Request, _context: Context) => {
         headers: {
           "content-type": "application/json",
           "cache-control": "no-store, no-cache, must-revalidate",
+          "access-control-allow-origin": "*",
         },
       }
     );
   }
 
-  const targetUrl = new URL(url.pathname + url.search, UPSTREAM);
+  // Determine target upstream (Codebuff vs ExperientialLabs)
+  let upstreamBase = CODEBUFF_UPSTREAM;
+  let upstreamHost = CODEBUFF_HOST;
+  let targetPath = url.pathname;
+
+  const authHeader = req.headers.get("authorization") || "";
+  const isXpl = 
+    url.pathname.startsWith("/xpl") || 
+    (url.pathname.startsWith("/v1") && !url.pathname.startsWith("/api/v1")) ||
+    req.headers.get("x-target-service") === "experientiallabs" ||
+    authHeader.startsWith("Bearer xpl_");
+
+  if (isXpl) {
+    upstreamBase = EXPERIENTIAL_UPSTREAM;
+    upstreamHost = EXPERIENTIAL_HOST;
+    if (url.pathname.startsWith("/xpl")) {
+      targetPath = url.pathname.replace(/^\/xpl/, "");
+    }
+  }
+
+  const targetUrl = new URL(targetPath + url.search, upstreamBase);
   const headers = new Headers();
 
   // Forward only clean, sanitized headers
@@ -84,7 +121,7 @@ export default async (req: Request, _context: Context) => {
   }
 
   // Force upstream host and US locale/timezone parameters
-  headers.set("host", UPSTREAM_HOST);
+  headers.set("host", upstreamHost);
   headers.set("accept-language", "en-US,en;q=0.9");
   headers.set("x-fb-timezone", "America/Los_Angeles");
 
@@ -107,6 +144,10 @@ export default async (req: Request, _context: Context) => {
       }
     }
 
+    respHeaders.set("access-control-allow-origin", "*");
+    respHeaders.set("access-control-allow-methods", "GET, POST, PUT, DELETE, OPTIONS");
+    respHeaders.set("access-control-allow-headers", "*");
+
     // Ensure streaming SSE responses are never buffered or cut early
     if (respHeaders.get("content-type")?.includes("text/event-stream")) {
       respHeaders.set("cache-control", "no-cache, no-transform");
@@ -122,11 +163,14 @@ export default async (req: Request, _context: Context) => {
     return new Response(
       JSON.stringify({
         error: "relay_upstream_error",
-        message: err?.message || "Failed to reach Codebuff upstream server",
+        message: err?.message || `Failed to reach ${upstreamHost} upstream server`,
       }),
       {
         status: 502,
-        headers: { "content-type": "application/json" },
+        headers: { 
+          "content-type": "application/json",
+          "access-control-allow-origin": "*" 
+        },
       }
     );
   }
